@@ -15,7 +15,7 @@ Most people have watched a chatbot answer appear a few words at a time. It's eas
 
 The model might need several seconds to generate a complete response. If an HTTP gateway waits for all of it before replying, users stare at a blank screen. Streaming lets clients show the beginning while the backend keeps working.
 
-In this tutorial, we'll build a small streaming gateway in Go, start a mock inference backend, and watch the events arrive with \`curl\`. Then we'll follow the code from the server entry point down to the response-copy loop.
+In this tutorial, we'll build a small streaming gateway in Go, start a mock inference backend, and watch the events arrive with `curl`. Then we'll follow the code from the server entry point down to the response-copy loop.
 
 We won't need Kubernetes, a GPU, or a cloud account.
 
@@ -38,7 +38,7 @@ Streaming is useful for interactive chat, code completion, and long generations.
 
 ## What are Server-Sent Events?
 
-**Server-Sent Events (SSE)** are a standardized way to send a series of text events from a server to a client over an HTTP response. The response declares \`Content-Type: text/event-stream\`. Each event uses simple lines such as \`data:\`, optionally \`event:\` and \`id:\`, with an empty line separating events.
+**Server-Sent Events (SSE)** are a standardized way to send a series of text events from a server to a client over an HTTP response. The response declares `Content-Type: text/event-stream`. Each event uses simple lines such as `data:`, optionally `event:` and `id:`, with an empty line separating events.
 
 For example:
 
@@ -51,13 +51,13 @@ data: [DONE]
 
 ~~~
 
-The \`[DONE]\` marker is a convention used by some inference APIs, **not** a requirement of the SSE standard. Our mock uses it to indicate completion.
+The `[DONE]` marker is a convention used by some inference APIs, **not** a requirement of the SSE standard. Our mock uses it to indicate completion.
 
 SSE is *one-directional*: the client sends an HTTP request, then the server sends updates on the response stream. WebSockets provide a two-way channel and can be better when both sides must continuously exchange messages. For ordinary text generation, a normal HTTP request plus an incremental response is often enough.
 
 SSE is a web standard, and it's also a widely adopted format for **streaming text inference APIs**. OpenAI's streaming Chat Completions and Responses APIs use SSE, though their event schemas differ; other inference servers and gateways support OpenAI-style streaming. That doesn't mean every inference transport uses SSE, or that our synthetic event schema is OpenAI compatible.
 
-One detail matters for browsers: the native \`EventSource\` interface commonly opens a GET stream. Our lab uses a POST request containing JSON and reads its SSE response through curl. A browser application making this POST would normally use \`fetch()\` plus a stream parser rather than \`new EventSource()\`.
+One detail matters for browsers: the native `EventSource` interface commonly opens a GET stream. Our lab uses a POST request containing JSON and reads its SSE response through curl. A browser application making this POST would normally use `fetch()` plus a stream parser rather than `new EventSource()`.
 
 See the [MDN guide to SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) and [OpenAI's streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses).
 
@@ -66,7 +66,7 @@ See the [MDN guide to SSE](https://developer.mozilla.org/en-US/docs/Web/API/Serv
 Two small Go programs:
 
 1. **Mock backend:** waits a quarter-second, sends one SSE event, then repeats. It simulates the *network shape* of token streaming, not model computation.
-2. **Gateway:** forwards \`POST /v1/chat/completions\` to that backend and copies the response as it arrives.
+2. **Gateway:** forwards `POST /v1/chat/completions` to that backend and copies the response as it arrives.
 
 The important part isn't the sample text. It's preserving the stream across an HTTP proxy.
 
@@ -93,7 +93,7 @@ Those commands produce two local executables. There's no external Go dependency 
 ./bin/mock-backend
 ~~~
 
-By default, it listens on \`localhost:8081\` (the bind address is \`:8081\`).
+By default, it listens on `localhost:8081` (the bind address is `:8081`).
 
 ### Terminal 2: start the gateway
 
@@ -112,9 +112,9 @@ curl -N -i http://localhost:8080/v1/chat/completions \
   -d '{"prompt":"Hello, infrastructure"}'
 ~~~
 
-The \`-i\` option includes response headers. The \`-N\` option disables curl's output buffering, so you can see each event promptly.
+The `-i` option includes response headers. The `-N` option disables curl's output buffering, so you can see each event promptly.
 
-You should see headers including \`Content-Type: text/event-stream\`, followed by events with visible pauses between them:
+You should see headers including `Content-Type: text/event-stream`, followed by events with visible pauses between them:
 
 ~~~text
 data: {"token":"Hello"}
@@ -153,13 +153,13 @@ curl -sS -N -o /dev/null \
   -d '{}'
 ~~~
 
-\`time_starttransfer\` measures the first HTTP response byte, **not necessarily the first SSE data event**. Our proxy writes headers before it reads the first token, so don't present that curl number as model TTFT.
+`time_starttransfer` measures the first HTTP response byte, **not necessarily the first SSE data event**. Our proxy writes headers before it reads the first token, so don't present that curl number as model TTFT.
 
 ## Walk through the code, from top to bottom
 
 The repository separates the executable entry point from the HTTP handler. We'll follow the same order a request takes.
 
-### 1. Start the gateway: \`cmd/gateway/main.go\`
+### 1. Start the gateway: `cmd/gateway/main.go`
 
 Our executable reads its backend address from an environment variable, constructs a handler, and starts an HTTP server.
 
@@ -184,11 +184,11 @@ func main() {
 }
 ~~~
 
-\`main\` does very little deliberately. It handles configuration and bootstrapping; request handling lives in \`internal/gateway\`.
+`main` does very little deliberately. It handles configuration and bootstrapping; request handling lives in `internal/gateway`.
 
-Notice the \`ReadHeaderTimeout\`. It protects against clients that trickle request headers. We don't set a blanket server \`WriteTimeout\` in this lab because streams may stay open for longer than a normal response. Production deployments need explicit policies for maximum stream duration and idle clients.
+Notice the `ReadHeaderTimeout`. It protects against clients that trickle request headers. We don't set a blanket server `WriteTimeout` in this lab because streams may stay open for longer than a normal response. Production deployments need explicit policies for maximum stream duration and idle clients.
 
-### 2. Build the upstream client: \`gateway.New()\`
+### 2. Build the upstream client: `gateway.New()`
 
 Before accepting requests, we validate the backend origin. We restrict it to HTTP or HTTPS, with no embedded credentials, query string, or custom path.
 
@@ -215,9 +215,9 @@ func New(rawURL string) (*Handler, error) {
 }
 ~~~
 
-The transport's \`ResponseHeaderTimeout\` limits how long we wait for upstream **headers**. It does not cap the duration of an active token stream. A fixed backend origin also avoids making this gateway a general-purpose proxy to arbitrary addresses.
+The transport's `ResponseHeaderTimeout` limits how long we wait for upstream **headers**. It does not cap the duration of an active token stream. A fixed backend origin also avoids making this gateway a general-purpose proxy to arbitrary addresses.
 
-### 3. Accept a request: \`ServeHTTP()\`
+### 3. Accept a request: `ServeHTTP()`
 
 This is the main handler. It serves a health endpoint, rejects unknown paths, and accepts POST requests on a single inference path.
 
@@ -250,7 +250,7 @@ Check the health endpoint:
 curl -i http://localhost:8080/healthz
 ~~~
 
-You should get \`200 OK\` and \`ok\`.
+You should get `200 OK` and `ok`.
 
 ### 4. Forward the request upstream
 
@@ -275,7 +275,7 @@ for _, name := range []string{"Content-Type", "Authorization", "Accept"} {
 }
 ~~~
 
-Using \`r.Context()\` helps the upstream work stop when the downstream request is canceled. This matters for inference: a disconnected user shouldn't consume expensive decode time indefinitely.
+Using `r.Context()` helps the upstream work stop when the downstream request is canceled. This matters for inference: a disconnected user shouldn't consume expensive decode time indefinitely.
 
 We're forwarding selected headers for the lab. In production, authentication and header policy need more careful design. Here, there is no request-body limit and no validation of the JSON schema.
 
@@ -329,13 +329,13 @@ for {
 }
 ~~~
 
-A regular \`io.ReadAll(resp.Body)\` would wait for the upstream response to finish. Instead, we read a chunk, write it downstream, and call \`Flush\` to encourage the HTTP server to send buffered bytes.
+A regular `io.ReadAll(resp.Body)` would wait for the upstream response to finish. Instead, we read a chunk, write it downstream, and call `Flush` to encourage the HTTP server to send buffered bytes.
 
-\`Flush\` doesn't guarantee that every token becomes a separate packet or arrives immediately. Reverse proxies, compression, network congestion, and clients can all affect delivery. The \`X-Accel-Buffering: no\` header is a hint understood by some proxies, not a universal HTTP feature.
+`Flush` doesn't guarantee that every token becomes a separate packet or arrives immediately. Reverse proxies, compression, network congestion, and clients can all affect delivery. The `X-Accel-Buffering: no` header is a hint understood by some proxies, not a universal HTTP feature.
 
 Also, HTTP read boundaries do **not** correspond to SSE event boundaries. One read may contain half an event or several. That's acceptable for our byte-forwarding gateway; it doesn't inspect or transform events.
 
-### 7. Generate the events: \`cmd/mock-backend/main.go\`
+### 7. Generate the events: `cmd/mock-backend/main.go`
 
 Finally, let's look at what the upstream server actually does.
 
@@ -369,7 +369,7 @@ f.Flush()
 
 This is the whole trick: the backend doesn't accumulate all the events before returning. It sends the first, pauses, sends the second, and continues.
 
-The mock listens on \`:8081\` by default. You can set \`MOCK_ADDR\` to change the bind address.
+The mock listens on `:8081` by default. You can set `MOCK_ADDR` to change the bind address.
 
 ## Experiment: what happens when the backend is unavailable?
 
@@ -381,9 +381,9 @@ curl -i http://localhost:8080/v1/chat/completions \
   -d '{}'
 ~~~
 
-Expect \`502 Bad Gateway\`, because the gateway can't establish the upstream response.
+Expect `502 Bad Gateway`, because the gateway can't establish the upstream response.
 
-There's a second, subtler case: suppose a backend sends three events and then disconnects. The client may already have seen \`200 OK\`. The gateway can't retroactively turn that into a 502. The application protocol must let the caller detect an incomplete stream. Our simple byte proxy doesn't synthesize a termination error event. This is one of the reasons production gateways handle stream lifecycles more explicitly.
+There's a second, subtler case: suppose a backend sends three events and then disconnects. The client may already have seen `200 OK`. The gateway can't retroactively turn that into a 502. The application protocol must let the caller detect an incomplete stream. Our simple byte proxy doesn't synthesize a termination error event. This is one of the reasons production gateways handle stream lifecycles more explicitly.
 
 Try pressing Ctrl+C while curl is still receiving events. The request context is canceled and the upstream should stop doing work. In a real serving system, cancellation may also require coordination with the inference engine.
 
