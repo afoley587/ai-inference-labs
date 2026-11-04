@@ -1,67 +1,122 @@
 ---
 title: "Building a Streaming AI Inference Gateway in Go"
-subtitle: "Forward an inference stream without buffering it into a single late response."
+subtitle: "Why inference APIs stream, how SSE works, and how to forward responses without waiting for the whole answer."
 status: draft
 series: AI Inference Labs
 tags: [golang, inference, streaming, sse, networking]
 thumbnail: ../assets/02-streaming-gateway-cover.svg
 ---
 
-![Streaming gateway architecture](../assets/02-streaming-gateway-cover.svg)
+![A streaming Go gateway between a client and an inference backend](../assets/02-streaming-gateway-cover.svg)
 
 # Building a Streaming AI Inference Gateway in Go
 
-Streaming is easy to demo and surprisingly easy to break.
+Most people have watched a chatbot answer appear a few words at a time. It's easy to overlook the infrastructure behind that experience.
 
-An inference backend sends tokens as they become available. A proxy sits in front of it. If that proxy reads the entire upstream body before replying, your client gets an answer—but none of the responsiveness streaming was meant to provide.
+The model might need several seconds to generate a complete response. If an HTTP gateway waits for all of it before replying, users stare at a blank screen. Streaming lets clients show the beginning while the backend keeps working.
 
-Let's build a small gateway that forwards upstream Server-Sent Events (SSE) as bytes arrive.
+In this tutorial, we'll build a small streaming gateway in Go, start a mock inference backend, and watch the events arrive with \`curl\`. Then we'll follow the code from the server entry point down to the response-copy loop.
 
-**Source:** [AI Inference Labs](../README.md) | **Language:** Go | **Cost:** No cloud account or GPU required
+We won't need Kubernetes, a GPU, or a cloud account.
 
-![Streaming request and response flow](../assets/02-streaming-flow.svg)
+**Code:** [AI Inference Labs](../README.md) · **Prerequisites:** Go 1.22+, curl, three terminals · **Cost:** $0 locally
 
-## What we're building
+![The request goes through a Go gateway to a mock backend, and events stream back to the client](../assets/02-streaming-flow.svg)
 
-The lab has two binaries:
+## Why stream inference responses?
 
-- `mock-backend`: emits a few synthetic SSE tokens with a configurable delay.
-- `gateway`: forwards POST requests to that backend and flushes streamed chunks toward the client.
+In autoregressive inference, a model typically emits output tokens incrementally. Waiting for a whole answer discards that incremental progress at the API boundary.
 
-The backend is deliberately a **simulator, not an LLM**. It lets us test network behavior without confusing that with actual prefill or decode performance.
+There are two separate latency questions:
 
-The gateway has a single route, `POST /v1/chat/completions`, plus `GET /healthz`.
+- **Time to first token (TTFT):** when does the client see the first generated output?
+- **Time per output token (TPOT):** how quickly does the remaining output arrive?
 
-This isn't an OpenAI-compatible inference implementation. We forward request bytes and return upstream response bytes without validating the model or request format.
+A gateway can't make a slow model decode faster. But it can make the experience worse by buffering a response that was already ready to send.
 
-## Step 1: Clone and run
+Streaming is useful for interactive chat, code completion, and long generations. Non-streaming responses still make sense for batch processing or callers that need the final complete object.
 
-You need Go 1.22 or later.
+## What are Server-Sent Events?
 
-```bash
+**Server-Sent Events (SSE)** are a standardized way to send a series of text events from a server to a client over an HTTP response. The response declares \`Content-Type: text/event-stream\`. Each event uses simple lines such as \`data:\`, optionally \`event:\` and \`id:\`, with an empty line separating events.
+
+For example:
+
+~~~text
+data: {"token":"Hello"}
+
+data: {"token":" world"}
+
+data: [DONE]
+
+~~~
+
+The \`[DONE]\` marker is a convention used by some inference APIs, **not** a requirement of the SSE standard. Our mock uses it to indicate completion.
+
+SSE is *one-directional*: the client sends an HTTP request, then the server sends updates on the response stream. WebSockets provide a two-way channel and can be better when both sides must continuously exchange messages. For ordinary text generation, a normal HTTP request plus an incremental response is often enough.
+
+SSE is a web standard, and it's also a widely adopted format for **streaming text inference APIs**. OpenAI's streaming Chat Completions and Responses APIs use SSE, though their event schemas differ; other inference servers and gateways support OpenAI-style streaming. That doesn't mean every inference transport uses SSE, or that our synthetic event schema is OpenAI compatible.
+
+One detail matters for browsers: the native \`EventSource\` interface commonly opens a GET stream. Our lab uses a POST request containing JSON and reads its SSE response through curl. A browser application making this POST would normally use \`fetch()\` plus a stream parser rather than \`new EventSource()\`.
+
+See the [MDN guide to SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) and [OpenAI's streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses).
+
+## What we'll build
+
+Two small Go programs:
+
+1. **Mock backend:** waits a quarter-second, sends one SSE event, then repeats. It simulates the *network shape* of token streaming, not model computation.
+2. **Gateway:** forwards \`POST /v1/chat/completions\` to that backend and copies the response as it arrives.
+
+The important part isn't the sample text. It's preserving the stream across an HTTP proxy.
+
+Our endpoint borrows a common inference API path, but the mock payload is deliberately **not OpenAI-compatible JSON**. We're learning the transport first.
+
+## Build the programs
+
+Start by cloning the repository. If you're following the still-unmerged draft pull request, check out the tutorial branch before building:
+
+~~~bash
 git clone https://github.com/afoley587/ai-inference-labs.git
 cd ai-inference-labs
-go test ./...
-go run ./cmd/mock-backend
-```
+git checkout content/01-prefill-decode-and-gateway
 
-In another terminal:
+go build -o ./bin/mock-backend ./cmd/mock-backend
+go build -o ./bin/gateway ./cmd/gateway
+~~~
 
-```bash
-BACKEND_URL=http://localhost:8081 go run ./cmd/gateway
-```
+Those commands produce two local executables. There's no external Go dependency or model download.
 
-Then send a request:
+### Terminal 1: start the simulated backend
 
-```bash
+~~~bash
+./bin/mock-backend
+~~~
+
+By default, it listens on \`localhost:8081\` (the bind address is \`:8081\`).
+
+### Terminal 2: start the gateway
+
+~~~bash
+BACKEND_URL=http://localhost:8081 ./bin/gateway
+~~~
+
+The gateway listens on port 8080 and forwards the chat-completion path to 8081.
+
+### Terminal 3: watch the response
+
+~~~bash
 curl -N -i http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
   -d '{"prompt":"Hello, infrastructure"}'
-```
+~~~
 
-Expected **shape** of the body (events arrive over time; exact timing depends on your machine):
+The \`-i\` option includes response headers. The \`-N\` option disables curl's output buffering, so you can see each event promptly.
 
-```text
+You should see headers including \`Content-Type: text/event-stream\`, followed by events with visible pauses between them:
+
+~~~text
 data: {"token":"Hello"}
 
 data: {"token":" from"}
@@ -73,86 +128,301 @@ data: {"token":" mock"}
 data: {"token":" backend"}
 
 data: [DONE]
-```
 
-Using `curl -N` disables curl's output buffering. It doesn't change what the server sends.
+~~~
 
-## Step 2: Forward the request without rewriting it
+The exact JSON field layout is just our mock protocol. It isn't a real LLM answer.
 
-The gateway builds an upstream request with the incoming request context:
+Try hitting the backend directly:
 
-```go
-upstreamReq, err := http.NewRequestWithContext(
-    r.Context(), r.Method, target.String(), r.Body,
+~~~bash
+curl -N http://localhost:8081/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+~~~
+
+Compare that with the gateway request. Both should stream rather than wait for all five tokens. This is an observation to make locally, not a published performance benchmark.
+
+You can also ask curl to show basic timing:
+
+~~~bash
+curl -sS -N -o /dev/null \
+  -w 'First response byte: %{time_starttransfer}s\nTotal: %{time_total}s\n' \
+  http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+~~~
+
+\`time_starttransfer\` measures the first HTTP response byte, **not necessarily the first SSE data event**. Our proxy writes headers before it reads the first token, so don't present that curl number as model TTFT.
+
+## Walk through the code, from top to bottom
+
+The repository separates the executable entry point from the HTTP handler. We'll follow the same order a request takes.
+
+### 1. Start the gateway: \`cmd/gateway/main.go\`
+
+Our executable reads its backend address from an environment variable, constructs a handler, and starts an HTTP server.
+
+~~~go
+func main() {
+    target := os.Getenv("BACKEND_URL")
+    if target == "" { target = "http://localhost:8081" }
+
+    handler, err := gateway.New(target)
+    if err != nil { log.Fatal(err) }
+
+    addr := os.Getenv("GATEWAY_ADDR")
+    if addr == "" { addr = ":8080" }
+
+    server := &http.Server{
+        Addr: addr,
+        Handler: handler,
+        ReadHeaderTimeout: 5 * time.Second,
+    }
+    log.Printf("gateway listening on %s; upstream %s", addr, target)
+    log.Fatal(server.ListenAndServe())
+}
+~~~
+
+\`main\` does very little deliberately. It handles configuration and bootstrapping; request handling lives in \`internal/gateway\`.
+
+Notice the \`ReadHeaderTimeout\`. It protects against clients that trickle request headers. We don't set a blanket server \`WriteTimeout\` in this lab because streams may stay open for longer than a normal response. Production deployments need explicit policies for maximum stream duration and idle clients.
+
+### 2. Build the upstream client: \`gateway.New()\`
+
+Before accepting requests, we validate the backend origin. We restrict it to HTTP or HTTPS, with no embedded credentials, query string, or custom path.
+
+~~~go
+func New(rawURL string) (*Handler, error) {
+    u, err := url.Parse(rawURL)
+    if err != nil || u == nil ||
+        (u.Scheme != "http" && u.Scheme != "https") ||
+        u.Host == "" || u.User != nil ||
+        u.RawQuery != "" || u.Fragment != "" {
+        return nil, fmt.Errorf("invalid backend URL: use an http(s) origin without credentials, query or fragment")
+    }
+    if u.Path != "" && u.Path != "/" {
+        return nil, fmt.Errorf("backend URL must not include a path")
+    }
+
+    transport := http.DefaultTransport.(*http.Transport).Clone()
+    transport.ResponseHeaderTimeout = 10 * time.Second
+
+    return &Handler{
+        target: u,
+        client: &http.Client{Transport: transport},
+    }, nil
+}
+~~~
+
+The transport's \`ResponseHeaderTimeout\` limits how long we wait for upstream **headers**. It does not cap the duration of an active token stream. A fixed backend origin also avoids making this gateway a general-purpose proxy to arbitrary addresses.
+
+### 3. Accept a request: \`ServeHTTP()\`
+
+This is the main handler. It serves a health endpoint, rejects unknown paths, and accepts POST requests on a single inference path.
+
+~~~go
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
+        w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+        _, _ = io.WriteString(w, "ok\n")
+        return
+    }
+    if r.URL.Path != "/v1/chat/completions" {
+        http.NotFound(w, r)
+        return
+    }
+    if r.Method != http.MethodPost {
+        w.Header().Set("Allow", "POST")
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // The upstream request is built next...
+}
+~~~
+
+Why keep the route fixed? It gives us a small, auditable surface. Later labs can introduce model-aware routing without confusing the exercise with open-proxy behavior.
+
+Check the health endpoint:
+
+~~~bash
+curl -i http://localhost:8080/healthz
+~~~
+
+You should get \`200 OK\` and \`ok\`.
+
+### 4. Forward the request upstream
+
+Now we build a new HTTP request targeting the mock backend. Crucially, we carry the inbound context into it.
+
+~~~go
+target := *h.target
+target.Path = r.URL.Path
+target.RawQuery = r.URL.RawQuery
+
+upstream, err := http.NewRequestWithContext(
+    r.Context(), http.MethodPost, target.String(), r.Body,
 )
-```
+if err != nil {
+    http.Error(w, "failed to construct upstream request", http.StatusBadRequest)
+    return
+}
+for _, name := range []string{"Content-Type", "Authorization", "Accept"} {
+    if value := r.Header.Get(name); value != "" {
+        upstream.Header.Set(name, value)
+    }
+}
+~~~
 
-The context matters. When the downstream client disconnects, the upstream request can be canceled rather than continuing to generate output nobody will read.
+Using \`r.Context()\` helps the upstream work stop when the downstream request is canceled. This matters for inference: a disconnected user shouldn't consume expensive decode time indefinitely.
 
-We preserve the content type and authorization header for this limited demo. A production gateway needs a defined header policy, authentication, and protection against oversized bodies.
+We're forwarding selected headers for the lab. In production, authentication and header policy need more careful design. Here, there is no request-body limit and no validation of the JSON schema.
 
-## Step 3: Flush chunks as they arrive
+### 5. Connect to the backend
 
-The crucial operation is not `io.ReadAll`. It's a loop that copies incoming bytes to the response and calls `Flush`.
+The gateway's HTTP client sends the request and waits for upstream response headers.
 
-```go
+~~~go
+resp, err := h.client.Do(upstream)
+if err != nil {
+    http.Error(w, "upstream unavailable", http.StatusBadGateway)
+    return
+}
+defer resp.Body.Close()
+~~~
+
+If the connection fails before streaming starts, a normal HTTP error works. Once the first response bytes have been sent, failure reporting gets more complicated. We'll return to that.
+
+### 6. Send headers and flush as bytes arrive
+
+This is the heart of the tutorial.
+
+~~~go
+for _, name := range []string{"Content-Type", "Cache-Control", "X-Request-Id"} {
+    if value := resp.Header.Get(name); value != "" {
+        w.Header().Set(name, value)
+    }
+}
+w.Header().Set("X-Content-Type-Options", "nosniff")
+if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+    w.Header().Set("Cache-Control", "no-cache")
+    w.Header().Set("X-Accel-Buffering", "no")
+}
+w.WriteHeader(resp.StatusCode)
+
+flusher, canFlush := w.(http.Flusher)
 buf := make([]byte, 4096)
 for {
-    n, err := resp.Body.Read(buf)
+    n, readErr := resp.Body.Read(buf)
     if n > 0 {
-        if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+        if _, err := w.Write(buf[:n]); err != nil {
             return
         }
-        flusher.Flush()
+        if canFlush {
+            flusher.Flush()
+        }
     }
-    if err != nil {
+    if readErr != nil {
         return
     }
 }
-```
+~~~
 
-An HTTP read doesn't necessarily match an SSE event boundary. That's fine here because we're forwarding a byte stream, not parsing events. A caller that needs event-level semantics must parse SSE framing separately.
+A regular \`io.ReadAll(resp.Body)\` would wait for the upstream response to finish. Instead, we read a chunk, write it downstream, and call \`Flush\` to encourage the HTTP server to send buffered bytes.
 
-The gateway copies the response status and selected headers before writing the body. Once the response has started, it cannot change the HTTP status if the upstream dies halfway through. That's a normal streaming tradeoff.
+\`Flush\` doesn't guarantee that every token becomes a separate packet or arrives immediately. Reverse proxies, compression, network congestion, and clients can all affect delivery. The \`X-Accel-Buffering: no\` header is a hint understood by some proxies, not a universal HTTP feature.
 
-## Step 4: Verify streaming and cancellation
+Also, HTTP read boundaries do **not** correspond to SSE event boundaries. One read may contain half an event or several. That's acceptable for our byte-forwarding gateway; it doesn't inspect or transform events.
 
-Run:
+### 7. Generate the events: \`cmd/mock-backend/main.go\`
 
-```bash
-go test ./...
-go test -race ./...
-```
+Finally, let's look at what the upstream server actually does.
 
-The test suite uses `httptest` to confirm that the client can see the first event **before** the upstream produces the next event. Another test checks error status forwarding.
+Its handler sets SSE response headers, waits briefly, writes synthetic token events, and flushes each one.
 
-Those tests don't measure GPU performance or prove low latency in a production network. They establish that the gateway doesn't intentionally buffer the entire response.
+~~~go
+w.Header().Set("Content-Type", "text/event-stream")
+w.Header().Set("Cache-Control", "no-cache")
+w.Header().Set("X-Accel-Buffering", "no")
+f, ok := w.(http.Flusher)
+if !ok {
+    http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+    return
+}
 
-## Step 5: Explore a failure
+for _, token := range []string{"Hello", " from", " the", " mock", " backend"} {
+    select {
+    case <-r.Context().Done():
+        return
+    case <-time.After(250 * time.Millisecond):
+    }
+    data, _ := json.Marshal(map[string]string{"token": token})
+    if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+        return
+    }
+    f.Flush()
+}
+_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+f.Flush()
+~~~
 
-Stop the mock backend and repeat the request. The gateway should respond with `502 Bad Gateway` before starting the stream.
+This is the whole trick: the backend doesn't accumulate all the events before returning. It sends the first, pauses, sends the second, and continues.
 
-Now imagine a backend that disconnects after three tokens. The client has already received a `200 OK` and some bytes. A server can't revise that status to 502 afterward. A real inference protocol needs an explicit way to represent midstream failures and a client that knows what to do with incomplete output.
+The mock listens on \`:8081\` by default. You can set \`MOCK_ADDR\` to change the bind address.
 
-## What we'd change before production
+## Experiment: what happens when the backend is unavailable?
 
-This is deliberately small. A deployable gateway would need:
+Stop the mock backend with Ctrl+C, leave the gateway running, and make another request:
 
-- Request-body size limits and strict path handling.
-- Authentication, authorization and safe header forwarding.
-- Transport and connection limits, bounded concurrency, admission control and rate limits.
-- Separate metrics for upstream connection, first byte and stream completion.
-- OpenTelemetry traces and useful error classification.
-- SSE-aware handling if the gateway wants to transform events.
-- Proper load balancing, backend health and retry policies; never retry a partially delivered response as if nothing happened.
-- Security controls on the upstream URL, plus TLS and deployment policies.
+~~~bash
+curl -i http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+~~~
 
-The code also uses a fixed backend. We're not choosing between models or GPU nodes yet.
+Expect \`502 Bad Gateway\`, because the gateway can't establish the upstream response.
 
-## Where this goes next
+There's a second, subtler case: suppose a backend sends three events and then disconnects. The client may already have seen \`200 OK\`. The gateway can't retroactively turn that into a 502. The application protocol must let the caller detect an incomplete stream. Our simple byte proxy doesn't synthesize a termination error event. This is one of the reasons production gateways handle stream lifecycles more explicitly.
 
-The next lab adds multiple mock backends and selects among them. We'll begin with a naive routing policy, then expose backend load and see what changes.
+Try pressing Ctrl+C while curl is still receiving events. The request context is canceled and the upstream should stop doing work. In a real serving system, cancellation may also require coordination with the inference engine.
 
-But streaming comes first. If a gateway can't forward a response promptly and cancel work when the client leaves, a smarter scheduler won't fix the user experience.
+## Where this lab fits among existing products
 
-**Code:** [Gateway](../cmd/gateway/main.go) · [Mock backend](../cmd/mock-backend/main.go) · [Tests](../internal/gateway/gateway_test.go)
+We're not trying to replace a production serving stack with 100 lines of Go. It's more useful to understand where the gateway sits and which responsibilities others have already solved.
+
+| Project | Main role | Where it overlaps with our lab |
+| --- | --- | --- |
+| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | Model-serving engine with OpenAI-compatible HTTP endpoints | It can be the **backend** our gateway eventually forwards to; it also exposes streaming responses |
+| [LiteLLM Proxy](https://docs.litellm.ai/docs/) | Unified API gateway across model providers and deployments | Routing, fallbacks, credentials, observability and proxying, far beyond our fixed-backend example |
+| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/streaming/) | API gateway with AI-specific policies and streaming support | A production alternative for proxying and governing inference traffic |
+| [Envoy AI Gateway](https://aigateway.envoyproxy.io/) | AI-aware gateway built around Envoy | Provider integration, traffic controls and request handling at the gateway layer |
+| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and routing infrastructure | More advanced scheduling and serving concerns we'll explore in later labs |
+
+These aren't all direct competitors. vLLM and Dynamo include model-serving infrastructure, while LiteLLM, Kong and Envoy AI Gateway focus more on the traffic and API layer. Your deployment may use an API gateway **in front of** an inference engine rather than choosing just one.
+
+So why build a small gateway at all? Because a working stream proxy provides a clear place to experiment with policies—routing, timeouts, backpressure, observability and cache awareness—without hiding those decisions behind a large platform.
+
+## What we'd change before using this in production
+
+The gateway proves one narrow concept: incrementally forward an upstream SSE response. It does **not** implement authentication, full OpenAI response schemas, body limits, multi-backend discovery or safe retry policies.
+
+We'd add bounded concurrency, body-size limits, trusted upstream configuration, structured logs, tracing, useful latency metrics and a defined shutdown policy. We'd also need to handle failures inside a partially completed stream and confirm that any intermediate load balancer actually preserves streaming.
+
+Streaming doesn't remove model latency. It prevents our proxy from needlessly adding a full-response wait.
+
+## Where we go next
+
+Our gateway only has one backend. Next we'll put several simulated backends behind it, then ask the question that matters for AI infrastructure: if they all look healthy, which one should get the next request?
+
+That takes us from **stream forwarding** to **load-aware inference routing**.
+
+**Repository:** [AI Inference Labs](../README.md) · [Gateway source](../internal/gateway/gateway.go) · [Mock backend](../cmd/mock-backend/main.go)
+
+### References
+
+- [MDN: Using Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)
+- [MDN: EventSource and one-way connections](https://developer.mozilla.org/en-US/docs/Web/API/EventSource)
+- [OpenAI: Streaming API Responses](https://developers.openai.com/api/docs/guides/streaming-responses)
+- [Kong: AI Gateway Streaming](https://developer.konghq.com/ai-gateway/streaming/)
+- [vLLM: OpenAI-Compatible Server](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/)
