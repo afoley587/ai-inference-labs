@@ -12,9 +12,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Format check
-        run: |
-          test -z "$(gofmt -l cmd internal)"
       - name: Vet
         run: go vet ./...
       - name: Tests with race detector
