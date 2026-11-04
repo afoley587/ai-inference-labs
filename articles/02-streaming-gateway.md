@@ -57,20 +57,28 @@ For AI workloads, **stream preservation** is one of those basic correctness requ
 
 ## 2. Existing gateways and related products
 
-Before writing one, it's worth knowing what's already available.
+Before building a gateway, look at what engineers can already buy or run. The products below solve overlapping problems, but at different layers.
 
 | Project | Main job | When it makes sense |
 | --- | --- | --- |
-| [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) | Unified provider API, routing, virtual keys, budgets, fallbacks and usage reporting | You need to manage several providers and teams behind one endpoint |
-| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/) | Gateway policies, authentication, governance, model routing and metrics | You already operate an API gateway or need centralized governance |
-| [Envoy AI Gateway](https://aigateway.envoyproxy.io/) | AI-aware request handling on an Envoy-based data plane | You want gateway routing and policy integrated with cloud-native traffic infrastructure |
-| [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) | Managed gateway for analytics, controls and provider traffic | You prefer a managed edge-facing gateway |
-| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | An inference engine with an HTTP serving API | You need to **run** the model; it often sits behind, rather than replaces, a gateway |
-| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and specialized routing | You need deeper integration with distributed inference workers and their scheduling signals |
+| [OpenRouter](https://openrouter.ai/docs) | Managed API across models and inference providers; provider selection, performance-based routing and fallbacks | You want a single hosted endpoint and access to many providers without operating the routing service |
+| [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) | Managed AI traffic gateway with analytics, logging, caching, rate limits and fallback controls | You want to govern provider traffic near the edge, potentially alongside other Cloudflare services |
+| [ngrok AI Gateway](https://ngrok.ai/) | Managed model gateway with provider selection, access control, bring-your-own-keys and private access to self-hosted models | You need one endpoint spanning hosted models and models accessible over private connectivity |
+| [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) | Gateway software with a unified provider API, virtual keys, budgets, routing and fallbacks | You want more control over hosting and operating a multi-provider gateway |
+| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/) | API governance, authentication, policies, metrics and AI traffic management | You already have an API management platform or need centralized policies |
+| [Envoy AI Gateway](https://aigateway.envoyproxy.io/) | AI-aware request processing on Envoy infrastructure | You're building on an Envoy-based data plane |
+| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | Model execution and an HTTP serving interface | You need to **run** the model rather than just route requests to it |
+| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and specialized routing | You need closer coordination with inference workers and scheduling signals |
 
-These products don't all compete at the same layer. Some operate a gateway; others run and schedule inference itself. Production stacks often use both.
+**OpenRouter** illustrates one model of a large-scale gateway: the client picks a model, and the service can select among available inference providers using operational and pricing signals. Its routing policies and advertised metrics are useful references when designing a scheduler, although they aren't an independent benchmark of performance.
 
-We're not building a replacement for any of them. We want to understand the mechanics before later labs add routing, scheduling and telemetry.
+**Cloudflare AI Gateway** puts more emphasis on governing and observing requests through a managed edge service. Its documentation covers logging, caching, rate limiting, retries and fallbacks. It can also integrate custom HTTPS model providers, including self-hosted endpoints.
+
+**ngrok AI Gateway** is especially relevant if some inference endpoints sit inside private networks. Its documented gateway combines model/provider routing with access control and private connectivity to self-hosted models. That is a different problem from merely putting a public reverse proxy in front of a server.
+
+The distinctions matter. These services aren't interchangeable: hosted model aggregation, managed edge policy, private connectivity, self-hosted gateway software and GPU inference scheduling operate at different layers. A real architecture may combine them.
+
+Our Go lab starts much smaller. It gives us an explicit place to inspect the HTTP mechanics, then later experiment with routing, capacity and failure behavior. We wouldn't recommend replacing a production gateway with this example.
 
 ## 3. Why streaming matters
 
