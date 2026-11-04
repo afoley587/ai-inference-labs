@@ -65,64 +65,19 @@ A gateway also gives us another service that can fail. Even healthy model server
 
 For this lab, we'll focus on **stream preservation**. When a model sends output incrementally, the gateway should pass it along as it arrives.
 
-### Where authentication and authorization fit
+### Examples in practice
 
-When several teams share a model endpoint, the gateway needs a trusted way to identify the caller. **Authentication** establishes that identity. **Authorization** decides what the caller may do: for example, whether an application may use a particular model or send traffic to an external provider. We'd enforce both before dispatching work to the backend, where a rejected request could otherwise consume GPU capacity or incur provider charges.
+Existing tools illustrate where these responsibilities live:
 
-An internal platform might accept short-lived access tokens issued by its identity system. A customer-facing API might issue gateway API keys tied to customer accounts. Either way, the gateway resolves the credential to a trusted account or workload identity, then applies its model permissions and limits. It should derive tenant identity from that verified credential rather than trust an arbitrary customer ID supplied in the request body.
+| Example | Role |
+| --- | --- |
+| [OpenRouter](https://openrouter.ai/docs) | A managed entry point across models and inference providers. |
+| [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) | Gateway software you can operate, with provider routing and access policies. |
+| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | An inference server that executes model requests; a gateway can sit in front of it. |
 
-For JWT access tokens, validation includes the signature and expiration, along with the expected issuer and audience. The audience identifies the service the token was issued for; a token accepted by another application is not automatically valid at this gateway. [RFC 9068](https://datatracker.ietf.org/doc/html/rfc9068#section-4) describes validation for OAuth JWT access tokens. Single sign-on for the gateway's administration console is a separate concern from authenticating inference requests.
+## 2. Why streaming matters
 
-The caller's credential and the backend's credential also serve different purposes. In a gateway-managed credential setup, the client presents a gateway key or access token. The gateway obtains a provider key from a secrets system and uses it for the upstream call. That lets the platform rotate provider credentials without updating every application. Bring-your-own-key deployments need an explicit policy for selecting and handling customer provider keys. Our lab simply forwards `Authorization`; it does not implement either credential-management model. [LiteLLM's virtual keys](https://docs.litellm.ai/docs/proxy/virtual_keys) illustrate how a gateway can associate credentials with model access and spend controls.
-
-### Where billing and usage accounting fit
-
-Usage accounting connects inference work to the team or customer responsible for it. An internal platform can use it for **showback**, reporting each team's costs, or **chargeback**, allocating those costs to team budgets. A hosted AI API can use the same attributed usage to support customer invoices. Request counts alone are often insufficient: a short chat and a long document request can consume very different amounts of model work.
-
-A possible request lifecycle looks like this:
-
-```text
-Request → authenticate → authorize → check or reserve budget → backend
-                                                             │
-Client ←──────────────── streamed response ───────────────────┘
-                                                             │
-                         durable usage record ←───────────────┘
-                                  │
-                         metering and billing worker
-```
-
-Before dispatch, we'd attach a gateway-generated request ID and the verified account identity. If a hard spending limit is required, admission control can reserve an estimated allowance for the request and reconcile it with actual usage later. That reservation must account for concurrent requests; checking an asynchronously updated spend total alone cannot enforce a strict cap.
-
-During the response, a usage-aware component can collect backend-reported input and output token counts. Some APIs also report cached-token usage or other billable categories. Preserve those distinctions and record the actual model and provider used. Usage records should identify individual backend attempts as well as the overall request, so retries and fallbacks remain traceable. Provider cost and the price charged to a customer are separate calculations.
-
-Streaming adds a complication: final usage may arrive near the end of a response, and cancellation can prevent the gateway from receiving it. Counting SSE events or bytes does not give an accurate token count. Missing usage should be marked incomplete and reconciled against serving telemetry or provider records where available. A disconnected client may still have caused billable work. Collecting these records requires protocol-aware processing or a separate telemetry integration; our byte-forwarding loop does neither.
-
-We'd persist usage durably and let a worker deliver it to a billing system, keeping external billing API calls out of the token-forwarding loop. Stable event identifiers and deduplication make delivery retries safe. The billing integration can aggregate usage and apply pricing; the gateway enforces request-time entitlements and budgets. For an example of the downstream integration boundary, [Stripe's usage recording documentation](https://docs.stripe.com/billing/subscriptions/usage-based/recording-usage) describes metered usage ingestion and asynchronous aggregation.
-
-These integrations make a shared endpoint accountable: the platform can control who uses expensive resources and explain where the spend went. They are architectural extensions to this lab, with no auth or billing implementation added here.
-
-## 2. Existing gateways and related products
-
-Before committing to building a gateway, we'd look at the available services and software. The options below cover different parts of the request path, with some overlap.
-
-| Project | Main job | When it makes sense |
-| --- | --- | --- |
-| [OpenRouter](https://openrouter.ai/docs) | Managed API across models and inference providers; provider selection, performance-based routing and fallbacks | You want a single hosted endpoint and access to many providers without operating the routing service |
-| [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) | Managed AI traffic gateway with analytics, logging, caching, rate limits and fallback controls | You want to govern provider traffic near the edge, potentially alongside other Cloudflare services |
-| [ngrok AI Gateway](https://ngrok.ai/) | Managed model gateway with provider selection, access control, bring-your-own-keys and private access to self-hosted models | You need one endpoint spanning hosted models and models accessible over private connectivity |
-| [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) | Gateway software with a unified provider API, virtual keys, budgets, routing and fallbacks | You want more control over hosting and operating a multi-provider gateway |
-| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/) | API governance, authentication, policies, metrics and AI traffic management | You already have an API management platform or need centralized policies |
-| [Agent Router (formerly Envoy AI Gateway)](https://theagentrouter.ai/) | AI-aware request processing on Envoy infrastructure | You're building on an Envoy-based data plane |
-| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | Model execution and an HTTP serving interface | You need to **run** the model rather than just route requests to it |
-| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and specialized routing | You need closer coordination with inference workers and scheduling signals |
-
-The first group gives applications a shared entry point for model traffic. vLLM executes model requests, while Dynamo coordinates distributed inference serving. A deployment may use a gateway in front of a serving framework. The distinction helps us decide which component should own a policy or investigate a delay.
-
-Our Go lab gives us a small service where we can inspect the HTTP mechanics directly. Later, we can use it to experiment with routing and capacity, including how the gateway behaves when a backend fails. We'd keep this example as a learning tool rather than use it to replace a production gateway.
-
-## 3. Why streaming matters
-
-**Streaming** means delivering a response incrementally while it is still being produced, over the same open HTTP response. The client can process an early piece before the server finishes the rest. This differs from polling, where the client repeatedly sends requests to ask for progress.
+**Streaming** means delivering a response incrementally while it is still being produced, over the same open HTTP response. The client can process an early piece before the server finishes the rest.
 
 An **autoregressive** model generates each new token using the prompt and previously generated tokens. A token is a unit of text, often a word or part of one. If the API waits for the whole answer, the user sees none of that progress until generation finishes. In a streaming API, a message may contain several tokens or metadata; one network read does not necessarily mean one token.
 
@@ -156,13 +111,11 @@ Our mock uses `[DONE]` to indicate completion, following a convention used by so
 
 SSE is *one-directional*: the client sends an HTTP request, then the server sends updates on the response stream. WebSockets provide a two-way channel and can be better when both sides must continuously exchange messages. For ordinary text generation, a normal HTTP request plus an incremental response is often enough.
 
-SSE is a web standard, and it's also a widely adopted format for **streaming text inference APIs**. OpenAI's streaming Chat Completions and Responses APIs use SSE, though their event schemas differ; other inference servers and gateways support OpenAI-style streaming. Other inference transports use different formats. Our synthetic event schema also differs from OpenAI's schemas.
-
-One detail matters for browsers: the native `EventSource` interface commonly opens a GET stream. Our lab uses a POST request containing JSON and reads its SSE response through curl. A browser application making this POST would normally use `fetch()` plus a stream parser rather than `new EventSource()`.
+SSE is widely used for **streaming text inference APIs**, including OpenAI's Chat Completions and Responses APIs. Their event schemas differ, so a client still needs to understand the backend's API contract.
 
 See the [MDN guide to SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) and [OpenAI's streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses).
 
-## 4. Implementation: follow the request through the code
+## 3. Implementation: follow the request through the code
 
 We'll use two small Go programs:
 
@@ -270,7 +223,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 Keeping the route fixed makes the handler easier to review. We can add model-aware routing in later labs while keeping control over which destinations the gateway can reach.
 
-Once the services are running (section 5), check the health endpoint:
+Once the services are running (section 4), check the health endpoint:
 
 ~~~bash
 curl -i http://localhost:8080/healthz
@@ -300,7 +253,7 @@ for _, name := range []string{"Content-Type", "Authorization", "Accept"} {
 
 Using `r.Context()` helps the upstream work stop when the downstream request is canceled. This matters for inference: a disconnected user shouldn't consume expensive decode time indefinitely.
 
-We're forwarding selected headers for the lab. A production implementation would need a more detailed authentication and header policy. Here, there is no request-body limit and no validation of the JSON schema.
+We're forwarding selected headers for the lab. We'll discuss identity and provider credentials under production integrations.
 
 ### 5. Connect to the backend
 
@@ -363,7 +316,7 @@ for {
 
 Using `io.ReadAll(resp.Body)` here would make the gateway wait for the entire response. We read and forward a chunk at a time, calling `Flush` after each write to encourage the HTTP server to send buffered bytes.
 
-`http.NewResponseController` lets us flush through response-writer wrappers that expose `Unwrap`. A flush error ends the response; silently continuing without flush support would undermine the lab's streaming behavior. An upstream read error other than EOF triggers `http.ErrAbortHandler`, which tells Go's server to abort the response after headers have been committed. The gateway cannot replace a partially delivered answer with a new HTTP status. See the [Go HTTP documentation](https://pkg.go.dev/net/http).
+We use `http.NewResponseController` to flush buffered output and check for flush errors. If flushing fails, we abort the response. An upstream read error other than EOF triggers `http.ErrAbortHandler`, which tells Go's server to abort the response after headers have been committed. The gateway cannot replace a partially delivered answer with a new HTTP status. See the [Go HTTP documentation](https://pkg.go.dev/net/http).
 
 `Flush` doesn't guarantee that every token becomes a separate packet or arrives immediately. Reverse proxies, compression, network congestion, and clients can all affect delivery. The `X-Accel-Buffering: no` header is a hint understood by some proxies, not a universal HTTP feature.
 
@@ -405,7 +358,7 @@ Each event leaves the backend as it's generated. The client can see the first ev
 
 The mock listens on `:8081` by default. You can set `MOCK_ADDR` to change the bind address.
 
-## 5. Build it and test it locally
+## 4. Build it and test it locally
 
 Clone the repository and build the two programs. Use the branch or commit containing this lab if it has not yet been merged into your default branch:
 
@@ -464,8 +417,6 @@ data: [DONE]
 
 ~~~
 
-The JSON comes from our mock protocol; the backend generates no actual LLM output.
-
 Try hitting the backend directly:
 
 ~~~bash
@@ -474,7 +425,7 @@ curl -N http://localhost:8081/v1/chat/completions \
   -d '{}'
 ~~~
 
-Compare that with the gateway request. Both should show events arriving before all five tokens have been sent. Use this as a local check that forwarding works. The timings are observations from your machine.
+Compare that with the gateway request. Both should show events arriving before all five tokens have been sent.
 
 You can also ask curl to show basic timing:
 
@@ -506,27 +457,53 @@ Once output has reached the caller, automatically retrying on another backend ca
 
 Try pressing Ctrl+C while curl is still receiving events. The request context is canceled and the upstream should stop doing work. In a real serving system, cancellation may also require coordination with the inference engine.
 
-## 6. Next: replacing the mock with Ollama
+## 5. Production integrations and considerations
 
-The mock backend is convenient because its timing is predictable. Once you're comfortable with the flow, you can try a real local model served with [Ollama](https://docs.ollama.com/).
+The lab implements stream forwarding. A shared production endpoint also needs identity checks and usage accounting, with operational limits around long-lived requests. The following integrations are design considerations; we haven't implemented them here.
 
-Ollama exposes an OpenAI-compatible `/v1/chat/completions` interface with streaming support. Its **native** `/api/chat` streaming format is newline-delimited JSON, not the SSE events used in this lab. A future lab can target the OpenAI-compatible endpoint and send a genuine model request with a model name and `"stream": true`. The client must use that request schema and understand the returned events. Our byte-forwarding gateway can pass those bytes through without parsing the schema. Translation would only be needed if the client and backend used different API contracts.
+### Where authentication and authorization fit
 
-We'll leave model installation and the Ollama changes for a future lab. For now, the mock lets us inspect the HTTP stream on its own.
+When several teams share a model endpoint, the gateway needs a trusted way to identify the caller. **Authentication** establishes that identity. **Authorization** decides what the caller may do: for example, whether an application may use a particular model or send traffic to an external provider. We'd enforce both before dispatching work to the backend, where a rejected request could otherwise consume GPU capacity or incur provider charges.
 
-## Production considerations
+An internal platform might accept short-lived access tokens issued by its identity system. A customer-facing API might issue gateway API keys tied to customer accounts. Either way, the gateway resolves the credential to a trusted account or workload identity, then applies its model permissions and limits. It should derive tenant identity from that verified credential rather than trust an arbitrary customer ID supplied in the request body.
 
-This gateway demonstrates how to forward an upstream SSE response incrementally. It still needs authentication and body limits before handling untrusted traffic. It neither validates OpenAI request schemas nor translates response events, and it has no multi-backend discovery. Safe retry policies would need their own design.
+The caller's credential and the backend's credential also serve different purposes. In a gateway-managed credential setup, the client presents a gateway key or access token. The gateway obtains a provider key from a secrets system and uses it for the upstream call. That lets the platform rotate provider credentials without updating every application. Bring-your-own-key deployments need an explicit policy for selecting and handling customer provider keys. Our lab simply forwards `Authorization`; it does not implement either credential-management model. [LiteLLM's virtual keys](https://docs.litellm.ai/docs/proxy/virtual_keys) illustrate how a gateway can associate credentials with model access and spend controls.
 
-Before using it in production, we'd bound concurrency and request sizes, and restrict upstream configuration to trusted destinations. We'd also add structured logs and tracing, with latency metrics that show where requests spend time. Shutdown behavior and failures during streaming need explicit handling. And we'd test the stream through any intermediate load balancer, since the gateway alone can't control end-to-end buffering.
+### Where billing and usage accounting fit
+
+Usage accounting connects inference work to the team or customer responsible for it. An internal platform can use it for **showback**, reporting each team's costs, or **chargeback**, allocating those costs to team budgets. A hosted AI API can use the same attributed usage to support customer invoices. Request counts alone are often insufficient: a short chat and a long document request can consume very different amounts of model work.
+
+A possible request lifecycle looks like this:
+
+```text
+Request → authenticate → authorize → check or reserve budget → backend
+                                                             │
+Client ←──────────────── streamed response ───────────────────┘
+                                                             │
+                         durable usage record ←───────────────┘
+                                  │
+                         metering and billing worker
+```
+
+Before dispatch, we'd attach a gateway-generated request ID and the verified account identity. If a hard spending limit is required, admission control can reserve an estimated allowance for the request and reconcile it with actual usage later. That reservation must account for concurrent requests; checking an asynchronously updated spend total alone cannot enforce a strict cap.
+
+During the response, a usage-aware component can collect backend-reported input and output token counts. Some APIs also report cached-token usage or other billable categories. Preserve those distinctions and record the actual model and provider used. Usage records should identify individual backend attempts as well as the overall request, so retries and fallbacks remain traceable. Provider cost and the price charged to a customer are separate calculations.
+
+Streaming adds a complication: final usage may arrive near the end of a response, and cancellation can prevent the gateway from receiving it. Counting SSE events or bytes does not give an accurate token count. Missing usage should be marked incomplete and reconciled against serving telemetry or provider records where available. A disconnected client may still have caused billable work. Collecting these records requires protocol-aware processing or a separate telemetry integration; our byte-forwarding loop does neither.
+
+We'd persist usage durably and let a worker deliver it to a billing system, keeping external billing API calls out of the token-forwarding loop. Stable event identifiers and deduplication make delivery retries safe. The billing integration can aggregate usage and apply pricing; the gateway enforces request-time entitlements and budgets. For an example of the downstream integration boundary, [Stripe's usage recording documentation](https://docs.stripe.com/billing/subscriptions/usage-based/recording-usage) describes metered usage ingestion and asynchronous aggregation.
+
+### Resource limits and observability
+
+We'd bound concurrency and request sizes, and restrict upstream configuration to trusted destinations. Structured logs and tracing should show where requests spend time, using request IDs to connect gateway activity to backend work. We'd also define shutdown behavior and retry policies, and test streaming through every intermediate load balancer. Multi-backend discovery and API schema validation or translation would depend on the service contract.
 
 A slow client creates **backpressure**: downstream writes can block, which stops our copy loop from reading more upstream data. The loop uses a fixed-size application buffer, but the HTTP stack and operating system have their own buffers. This does not guarantee that the inference engine stops generating; its server must handle cancellation or slow consumers too.
 
 Long-lived streams also occupy connections for their duration. Production limits need to account for active streams and queued work, with write or idle deadlines to prevent a slow client from holding resources indefinitely. `/healthz` only reports that this handler is responding; it doesn't check backend readiness.
 
-Forwarding bytes as they arrive lets users see the model's progress without an extra wait for the complete response.
-
 ## Where we go next
+
+To try a real model, a future lab can point the gateway at [Ollama's OpenAI-compatible endpoint](https://docs.ollama.com/api/openai-compatibility). The client would send a model name and messages with `"stream": true`, then parse the backend's events. The forwarding loop can pass those bytes through unchanged.
 
 Next we'll put several simulated backends behind the gateway and choose where to send each request. Health checks alone won't tell us which backend has room for more work. We'll add load signals and use them to experiment with **load-aware inference routing**.
 
@@ -546,7 +523,6 @@ Next we'll put several simulated backends behind the gateway and choose where to
 
 - [Go: net/http](https://pkg.go.dev/net/http)
 - [MDN: Using Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)
-- [MDN: EventSource and one-way connections](https://developer.mozilla.org/en-US/docs/Web/API/EventSource)
 - [OpenAI: Streaming API Responses](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [Kong: AI Gateway Streaming](https://developer.konghq.com/ai-gateway/streaming/)
 - [vLLM: OpenAI-Compatible Server](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/)
