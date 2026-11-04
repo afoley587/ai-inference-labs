@@ -11,19 +11,68 @@ thumbnail: ../assets/02-streaming-gateway-cover.svg
 
 # Building a Streaming AI Inference Gateway in Go
 
-Most people have watched a chatbot answer appear a few words at a time. It's easy to overlook the infrastructure behind that experience.
+An application can call a model endpoint directly. For a prototype with one model, that's often the simplest and best design.
 
-The model might need several seconds to generate a complete response. If an HTTP gateway waits for all of it before replying, users stare at a blank screen. Streaming lets clients show the beginning while the backend keeps working.
+Things change when several applications share models, or when the same app needs to switch between inference providers and GPU clusters. You may want one place to enforce access policies, measure token consumption, select backends, limit demand and handle failures. That's where an AI gateway earns its place.
 
-In this tutorial, we'll build a small streaming gateway in Go, start a mock inference backend, and watch the events arrive with `curl`. Then we'll follow the code from the server entry point down to the response-copy loop.
-
-We won't need Kubernetes, a GPU, or a cloud account.
+In this lab we'll build the smallest useful piece of that architecture: an HTTP gateway that forwards streamed responses without waiting for the model to finish. We'll use Go and a mock inference backend so the network behavior is visible without a GPU.
 
 **Code:** [AI Inference Labs](../README.md) · **Prerequisites:** Go 1.22+, curl, three terminals · **Cost:** $0 locally
 
-![The request goes through a Go gateway to a mock backend, and events stream back to the client](../assets/02-streaming-flow.svg)
+![Request and streaming response through a Go gateway](../assets/02-streaming-flow.svg)
 
-## Why stream inference responses?
+## 1. What is an AI gateway, and why use one?
+
+An **AI gateway** is a service between applications and model endpoints. The application sends an inference request to the gateway, which applies any configured policy, chooses a destination, forwards the request and returns the response.
+
+There are two valid architectures:
+
+**Direct connection**
+
+```text
+Application → Model endpoint
+```
+
+**Gateway connection**
+
+```text
+Applications → AI gateway → Model A / Model B / Model C
+```
+
+In the direct version there is one fewer component and one fewer network hop. That is a genuine advantage. If you're running one private model, trust the clients, and don't need shared policies, putting a gateway in the middle can be unnecessary work.
+
+A gateway starts to pay for itself when the requirements grow:
+
+- **Routing and failover:** choose between local GPUs, hosted providers or regions without rewriting every client.
+- **Credentials and access:** avoid distributing model-provider keys across services; apply per-team or per-application permissions.
+- **Capacity protection:** apply concurrency limits, token budgets and admission control before an overloaded model server receives another request.
+- **Observability and cost:** collect latency, token usage, error rates and per-model spending at one boundary.
+- **Protocol consistency:** expose one client-facing contract while adapting to different model backends.
+
+These are *possible gateway responsibilities*, not features of our first implementation. Today's gateway has one configured backend, one HTTP route and no auth, balancing or usage accounting.
+
+A gateway also adds another failure domain. A bad timeout, buffering proxy or overloaded gateway can make healthy model servers appear slow. It needs to be reliable, observable and transparent enough that it doesn't become the very bottleneck it was meant to remove.
+
+For AI workloads, **stream preservation** is one of those basic correctness requirements: if the model sends output incrementally, the gateway must not hold the whole response until it's finished.
+
+## 2. Existing gateways and related products
+
+Before writing one, it's worth knowing what's already available.
+
+| Project | Main job | When it makes sense |
+| --- | --- | --- |
+| [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) | Unified provider API, routing, virtual keys, budgets, fallbacks and usage reporting | You need to manage several providers and teams behind one endpoint |
+| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/) | Gateway policies, authentication, governance, model routing and metrics | You already operate an API gateway or need centralized governance |
+| [Envoy AI Gateway](https://aigateway.envoyproxy.io/) | AI-aware request handling on an Envoy-based data plane | You want gateway routing and policy integrated with cloud-native traffic infrastructure |
+| [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) | Managed gateway for analytics, controls and provider traffic | You prefer a managed edge-facing gateway |
+| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | An inference engine with an HTTP serving API | You need to **run** the model; it often sits behind, rather than replaces, a gateway |
+| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and specialized routing | You need deeper integration with distributed inference workers and their scheduling signals |
+
+These products don't all compete at the same layer. Some operate a gateway; others run and schedule inference itself. Production stacks often use both.
+
+We're not building a replacement for any of them. We want to understand the mechanics before later labs add routing, scheduling and telemetry.
+
+## 3. Why streaming matters
 
 In autoregressive inference, a model typically emits output tokens incrementally. Waiting for a whole answer discards that incremental progress at the API boundary.
 
@@ -36,7 +85,7 @@ A gateway can't make a slow model decode faster. But it can make the experience 
 
 Streaming is useful for interactive chat, code completion, and long generations. Non-streaming responses still make sense for batch processing or callers that need the final complete object.
 
-## What are Server-Sent Events?
+### Why use SSE rather than WebSockets?
 
 **Server-Sent Events (SSE)** are a standardized way to send a series of text events from a server to a client over an HTTP response. The response declares `Content-Type: text/event-stream`. Each event uses simple lines such as `data:`, optionally `event:` and `id:`, with an empty line separating events.
 
@@ -61,7 +110,7 @@ One detail matters for browsers: the native `EventSource` interface commonly ope
 
 See the [MDN guide to SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) and [OpenAI's streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses).
 
-## What we'll build
+## 4. Implementation: follow the request through the code
 
 Two small Go programs:
 
@@ -72,90 +121,7 @@ The important part isn't the sample text. It's preserving the stream across an H
 
 Our endpoint borrows a common inference API path, but the mock payload is deliberately **not OpenAI-compatible JSON**. We're learning the transport first.
 
-## Build the programs
-
-Start by cloning the repository. If you're following the still-unmerged draft pull request, check out the tutorial branch before building:
-
-~~~bash
-git clone https://github.com/afoley587/ai-inference-labs.git
-cd ai-inference-labs
-git checkout content/01-prefill-decode-and-gateway
-
-go build -o ./bin/mock-backend ./cmd/mock-backend
-go build -o ./bin/gateway ./cmd/gateway
-~~~
-
-Those commands produce two local executables. There's no external Go dependency or model download.
-
-### Terminal 1: start the simulated backend
-
-~~~bash
-./bin/mock-backend
-~~~
-
-By default, it listens on `localhost:8081` (the bind address is `:8081`).
-
-### Terminal 2: start the gateway
-
-~~~bash
-BACKEND_URL=http://localhost:8081 ./bin/gateway
-~~~
-
-The gateway listens on port 8080 and forwards the chat-completion path to 8081.
-
-### Terminal 3: watch the response
-
-~~~bash
-curl -N -i http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: text/event-stream' \
-  -d '{"prompt":"Hello, infrastructure"}'
-~~~
-
-The `-i` option includes response headers. The `-N` option disables curl's output buffering, so you can see each event promptly.
-
-You should see headers including `Content-Type: text/event-stream`, followed by events with visible pauses between them:
-
-~~~text
-data: {"token":"Hello"}
-
-data: {"token":" from"}
-
-data: {"token":" the"}
-
-data: {"token":" mock"}
-
-data: {"token":" backend"}
-
-data: [DONE]
-
-~~~
-
-The exact JSON field layout is just our mock protocol. It isn't a real LLM answer.
-
-Try hitting the backend directly:
-
-~~~bash
-curl -N http://localhost:8081/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-~~~
-
-Compare that with the gateway request. Both should stream rather than wait for all five tokens. This is an observation to make locally, not a published performance benchmark.
-
-You can also ask curl to show basic timing:
-
-~~~bash
-curl -sS -N -o /dev/null \
-  -w 'First response byte: %{time_starttransfer}s\nTotal: %{time_total}s\n' \
-  http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-~~~
-
-`time_starttransfer` measures the first HTTP response byte, **not necessarily the first SSE data event**. Our proxy writes headers before it reads the first token, so don't present that curl number as model TTFT.
-
-## Walk through the code, from top to bottom
+The walkthrough starts at the gateway entry point, follows the inbound request into its handler, and ends with the backend producing events.
 
 The repository separates the executable entry point from the HTTP handler. We'll follow the same order a request takes.
 
@@ -371,7 +337,90 @@ This is the whole trick: the backend doesn't accumulate all the events before re
 
 The mock listens on `:8081` by default. You can set `MOCK_ADDR` to change the bind address.
 
-## Experiment: what happens when the backend is unavailable?
+## 5. Build it and test it locally
+
+Start by cloning the repository. If you're following the still-unmerged draft pull request, check out the tutorial branch before building:
+
+~~~bash
+git clone https://github.com/afoley587/ai-inference-labs.git
+cd ai-inference-labs
+git checkout content/01-prefill-decode-and-gateway
+
+go build -o ./bin/mock-backend ./cmd/mock-backend
+go build -o ./bin/gateway ./cmd/gateway
+~~~
+
+Those commands produce two local executables. There's no external Go dependency or model download.
+
+### Terminal 1: start the simulated backend
+
+~~~bash
+./bin/mock-backend
+~~~
+
+By default, it listens on `localhost:8081` (the bind address is `:8081`).
+
+### Terminal 2: start the gateway
+
+~~~bash
+BACKEND_URL=http://localhost:8081 ./bin/gateway
+~~~
+
+The gateway listens on port 8080 and forwards the chat-completion path to 8081.
+
+### Terminal 3: watch the response
+
+~~~bash
+curl -N -i http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"prompt":"Hello, infrastructure"}'
+~~~
+
+The `-i` option includes response headers. The `-N` option disables curl's output buffering, so you can see each event promptly.
+
+You should see headers including `Content-Type: text/event-stream`, followed by events with visible pauses between them:
+
+~~~text
+data: {"token":"Hello"}
+
+data: {"token":" from"}
+
+data: {"token":" the"}
+
+data: {"token":" mock"}
+
+data: {"token":" backend"}
+
+data: [DONE]
+
+~~~
+
+The exact JSON field layout is just our mock protocol. It isn't a real LLM answer.
+
+Try hitting the backend directly:
+
+~~~bash
+curl -N http://localhost:8081/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+~~~
+
+Compare that with the gateway request. Both should stream rather than wait for all five tokens. This is an observation to make locally, not a published performance benchmark.
+
+You can also ask curl to show basic timing:
+
+~~~bash
+curl -sS -N -o /dev/null \
+  -w 'First response byte: %{time_starttransfer}s\nTotal: %{time_total}s\n' \
+  http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+~~~
+
+`time_starttransfer` measures the first HTTP response byte, **not necessarily the first SSE data event**. Our proxy writes headers before it reads the first token, so don't present that curl number as model TTFT.
+
+### What happens when the backend fails?
 
 Stop the mock backend with Ctrl+C, leave the gateway running, and make another request:
 
@@ -387,23 +436,15 @@ There's a second, subtler case: suppose a backend sends three events and then di
 
 Try pressing Ctrl+C while curl is still receiving events. The request context is canceled and the upstream should stop doing work. In a real serving system, cancellation may also require coordination with the inference engine.
 
-## Where this lab fits among existing products
+## 6. Next: replacing the mock with Ollama
 
-We're not trying to replace a production serving stack with 100 lines of Go. It's more useful to understand where the gateway sits and which responsibilities others have already solved.
+The mock backend is convenient because its timing is predictable. Once the flow makes sense, the natural next step is a real local model served with [Ollama](https://docs.ollama.com/).
 
-| Project | Main role | Where it overlaps with our lab |
-| --- | --- | --- |
-| [vLLM](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) | Model-serving engine with OpenAI-compatible HTTP endpoints | It can be the **backend** our gateway eventually forwards to; it also exposes streaming responses |
-| [LiteLLM Proxy](https://docs.litellm.ai/docs/) | Unified API gateway across model providers and deployments | Routing, fallbacks, credentials, observability and proxying, far beyond our fixed-backend example |
-| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/streaming/) | API gateway with AI-specific policies and streaming support | A production alternative for proxying and governing inference traffic |
-| [Envoy AI Gateway](https://aigateway.envoyproxy.io/) | AI-aware gateway built around Envoy | Provider integration, traffic controls and request handling at the gateway layer |
-| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/latest/) | Distributed inference serving and routing infrastructure | More advanced scheduling and serving concerns we'll explore in later labs |
+Ollama exposes an OpenAI-compatible `/v1/chat/completions` interface with streaming support. Its **native** `/api/chat` streaming format is newline-delimited JSON, not the SSE events used in this lab. A future lab can target the OpenAI-compatible endpoint and send a genuine model request with a model name and `"stream": true`. The gateway will also need the correct response schema and model configuration.
 
-These aren't all direct competitors. vLLM and Dynamo include model-serving infrastructure, while LiteLLM, Kong and Envoy AI Gateway focus more on the traffic and API layer. Your deployment may use an API gateway **in front of** an inference engine rather than choosing just one.
+We won't install a model or change the code for Ollama here. The point of this exercise is to see the HTTP stream before adding a real inference engine.
 
-So why build a small gateway at all? Because a working stream proxy provides a clear place to experiment with policies—routing, timeouts, backpressure, observability and cache awareness—without hiding those decisions behind a large platform.
-
-## What we'd change before using this in production
+## Production considerations
 
 The gateway proves one narrow concept: incrementally forward an upstream SSE response. It does **not** implement authentication, full OpenAI response schemas, body limits, multi-backend discovery or safe retry policies.
 
@@ -413,7 +454,7 @@ Streaming doesn't remove model latency. It prevents our proxy from needlessly ad
 
 ## Where we go next
 
-Our gateway only has one backend. Next we'll put several simulated backends behind it, then ask the question that matters for AI infrastructure: if they all look healthy, which one should get the next request?
+Our gateway still has only one backend. Next we'll put several simulated backends behind it, then ask the question that matters for AI infrastructure: if they all look healthy, which one should get the next request?
 
 That takes us from **stream forwarding** to **load-aware inference routing**.
 
@@ -426,3 +467,4 @@ That takes us from **stream forwarding** to **load-aware inference routing**.
 - [OpenAI: Streaming API Responses](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [Kong: AI Gateway Streaming](https://developer.konghq.com/ai-gateway/streaming/)
 - [vLLM: OpenAI-Compatible Server](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/)
+
