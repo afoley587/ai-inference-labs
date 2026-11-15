@@ -4,10 +4,10 @@ subtitle: "How prefill and decode put different demands on your infrastructure, 
 status: draft
 series: AI Inference Labs
 tags: [llm-inference, gpu, scheduling, kv-cache, infrastructure]
-thumbnail: ../assets/01-prefill-decode-cover.svg
+thumbnail: ../assets/01-prefill-vs-decode/01-prefill-decode-cover.png
 ---
 
-![Prefill and decode: two phases, two infrastructure problems](../assets/01-prefill-decode-cover.svg)
+![Prefill and decode: two phases, two infrastructure problems](../assets/01-prefill-vs-decode/01-prefill-decode-cover.png)
 
 # Why LLM Inference Is Two Different Problems: Prefill and Decode
 
@@ -27,7 +27,7 @@ During **prefill**, the model processes the prompt tokens. In a transformer, thi
 
 During **decode**, the model processes the previously generated token, adds its attention keys and values to the cache, and selects the next token. That loop repeats until generation stops. Successive tokens within one request depend on the earlier ones, while a serving engine can batch decode work from multiple requests together.
 
-![Request path through prefill, KV cache and autoregressive decode](../assets/01-prefill-decode-flow.svg)
+![Request path through prefill, KV cache and autoregressive decode](../assets/01-prefill-vs-decode/01-prefill-decode-flow.png)
 
 The two stages may execute on the same GPU, but they place different demands on it.
 
@@ -51,7 +51,7 @@ When TTFT rises, we'd look at where that extra time went before tuning the GPU.
 
 Consider a request with a long input and a short output. Most of its useful work could happen before the first visible token. A chat request with a short input and a long output may spend more of its time in decode. These are examples to help reason about latency, rather than benchmark results.
 
-![An illustrative latency timeline showing queue, prefill and decode](../assets/01-latency-timeline.svg)
+![An illustrative latency timeline showing queue, prefill and decode](../assets/01-prefill-vs-decode/01-latency-timeline.png)
 
 Optimizing average end-to-end latency without separating these cases can hide the problem users notice most.
 
@@ -132,6 +132,7 @@ Prefill and decode put different demands on your infrastructure, even within a s
 
 ### Sources and further reading
 
+- Modular, [LLM Inference Handbook](https://handbook.modular.com/): a reference for inference concepts and performance metrics, with interactive tools for exploring prefill/decode scheduling and KV-cache memory.
 - Kwon et al., *Efficient Memory Management for Large Language Model Serving with PagedAttention*, SOSP 2023: https://arxiv.org/abs/2309.06180
 - Zhong et al., *DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving*, 2024: https://arxiv.org/abs/2401.09670
 - NVIDIA, *Mastering LLM Techniques: Inference Optimization*: https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/

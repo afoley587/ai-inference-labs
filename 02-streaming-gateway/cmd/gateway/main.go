@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/afoley587/ai-inference-labs/internal/gateway"
+	"github.com/afoley587/ai-inference-labs/02-streaming-gateway/internal/gateway"
 )
 
 func main() {

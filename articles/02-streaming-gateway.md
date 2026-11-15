@@ -4,10 +4,10 @@ subtitle: "A practical introduction to SSE and forwarding model responses as the
 status: draft
 series: AI Inference Labs
 tags: [golang, inference, streaming, sse, networking]
-thumbnail: ../assets/02-streaming-gateway-cover.svg
+thumbnail: ../assets/02-streaming-gateway/02-streaming-gateway-cover.png
 ---
 
-![A streaming Go gateway between a client and an inference backend](../assets/02-streaming-gateway-cover.svg)
+![A streaming Go gateway between a client and an inference backend](../assets/02-streaming-gateway/02-streaming-gateway-cover.png)
 
 # Building a Streaming AI Inference Gateway in Go
 
@@ -17,9 +17,9 @@ As more applications share models, a common entry point becomes useful. You may 
 
 We'll build a small part of that architecture in this lab: an HTTP gateway that forwards streamed responses as they arrive. We'll use Go and a mock inference backend, so you can see the network behavior without a GPU.
 
-**Code:** [AI Inference Labs](../README.md) · **Prerequisites:** Go 1.22+, curl, three terminals · **Cost:** $0 locally
+**Code:** [Streaming gateway lab](../02-streaming-gateway/) · **Prerequisites:** Go 1.22+, curl, three terminals · **Cost:** $0 locally
 
-![Request and streaming response through a Go gateway](../assets/02-streaming-flow.svg)
+![Request and streaming response through a Go gateway](../assets/02-streaming-gateway/02-streaming-flow.png)
 
 ## 1. Where an AI gateway fits
 
@@ -33,15 +33,11 @@ We can connect an application directly or put a gateway between it and the model
 
 **Direct connection**
 
-```text
-Application → Model endpoint
-```
+![An application sends requests directly to a model endpoint and receives the response stream.](../assets/02-streaming-gateway/02-direct-connection.png)
 
 **Gateway connection**
 
-```text
-Applications → AI gateway → Model A / Model B / Model C
-```
+![Applications use a shared AI gateway, which applies policy and routes each request to Model A, Model B, or Model C.](../assets/02-streaming-gateway/02-gateway-routing.png)
 
 A direct connection saves a network hop and leaves you with one less component to operate. We'd keep that design for a private model with trusted clients unless there's a need for shared policies.
 
@@ -126,7 +122,7 @@ We'll focus on preserving the stream across the HTTP proxy. The endpoint borrows
 
 We write the copy loop explicitly so you can follow buffering and failure behavior. For a general-purpose Go proxy, we'd start by evaluating the standard library's [`httputil.ReverseProxy`](https://pkg.go.dev/net/http/httputil#ReverseProxy), which already handles proxy-specific HTTP behavior. AI-aware policy would sit around that forwarding layer.
 
-The repository keeps startup code separate from the HTTP handler. We'll start with that entry point and follow a request through the gateway before looking at how the backend produces events.
+The Go module lives in `02-streaming-gateway/`; source paths below are relative to that directory. The module keeps startup code separate from the HTTP handler. We'll start with that entry point and follow a request through the gateway before looking at how the backend produces events.
 
 ### 1. Start the gateway: `cmd/gateway/main.go`
 
@@ -364,7 +360,7 @@ Clone the repository and build the two programs. Use the branch or commit contai
 
 ~~~bash
 git clone https://github.com/afoley587/ai-inference-labs.git
-cd ai-inference-labs
+cd ai-inference-labs/02-streaming-gateway
 
 go test -race ./...
 go build -o ./bin/mock-backend ./cmd/mock-backend
@@ -375,6 +371,8 @@ The tests check early delivery before backend completion, cancellation propagati
 
 ### Terminal 1: start the simulated backend
 
+Run the following commands from `02-streaming-gateway/`.
+
 ~~~bash
 ./bin/mock-backend
 ~~~
@@ -382,6 +380,8 @@ The tests check early delivery before backend completion, cancellation propagati
 By default, it listens on `localhost:8081` (the bind address is `:8081`).
 
 ### Terminal 2: start the gateway
+
+In a second terminal, enter the same `02-streaming-gateway/` directory.
 
 ~~~bash
 BACKEND_URL=http://localhost:8081 ./bin/gateway
@@ -475,15 +475,7 @@ Usage accounting connects inference work to the team or customer responsible for
 
 A possible request lifecycle looks like this:
 
-```text
-Request → authenticate → authorize → check or reserve budget → backend
-                                                             │
-Client ←──────────────── streamed response ───────────────────┘
-                                                             │
-                         durable usage record ←───────────────┘
-                                  │
-                         metering and billing worker
-```
+![The gateway authenticates and authorizes requests, checks budget, and forwards them to a backend. Responses stream back to the client while final reported usage is persisted for asynchronous billing.](../assets/02-streaming-gateway/02-request-lifecycle.png)
 
 Before dispatch, we'd attach a gateway-generated request ID and the verified account identity. If a hard spending limit is required, admission control can reserve an estimated allowance for the request and reconcile it with actual usage later. That reservation must account for concurrent requests; checking an asynchronously updated spend total alone cannot enforce a strict cap.
 
@@ -515,7 +507,7 @@ To try a real model, a future lab can point the gateway at [Ollama's OpenAI-comp
 
 Next we'll put several simulated backends behind the gateway and choose where to send each request. Health checks alone won't tell us which backend has room for more work. We'll add load signals and use them to experiment with **load-aware inference routing**.
 
-**Repository:** [AI Inference Labs](../README.md) · [Gateway source](../internal/gateway/gateway.go) · [Mock backend](../cmd/mock-backend/main.go)
+**Repository:** [AI Inference Labs](../README.md) · [Gateway source](../02-streaming-gateway/internal/gateway/gateway.go) · [Mock backend](../02-streaming-gateway/cmd/mock-backend/main.go)
 
 ## Terms at a glance
 

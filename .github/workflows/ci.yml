@@ -6,11 +6,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 02-streaming-gateway
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: 02-streaming-gateway/go.mod
           cache: false
       - name: Vet
         run: go vet ./...

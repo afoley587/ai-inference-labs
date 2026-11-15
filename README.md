@@ -6,22 +6,26 @@ Readable engineering articles paired with small, reproducible experiments about 
 
 | Format | Topic | Visuals |
 | --- | --- | --- |
-| Research explainer | [Why LLM Inference Is Two Different Problems: Prefill and Decode](articles/01-prefill-vs-decode.md) | [Cover](assets/01-prefill-decode-cover.svg) · [Flow](assets/01-prefill-decode-flow.svg) · [Latency](assets/01-latency-timeline.svg) |
-| Go tutorial | [Building a Streaming AI Inference Gateway in Go](articles/02-streaming-gateway.md) | [Cover](assets/02-streaming-gateway-cover.svg) · [Stream diagram](assets/02-streaming-flow.svg) |
+| Research explainer | [Why LLM Inference Is Two Different Problems: Prefill and Decode](articles/01-prefill-vs-decode.md) | [Cover](assets/01-prefill-vs-decode/01-prefill-decode-cover.png) · [Flow](assets/01-prefill-vs-decode/01-prefill-decode-flow.png) · [Latency](assets/01-prefill-vs-decode/01-latency-timeline.png) |
+| Go tutorial | [Building a Streaming AI Inference Gateway in Go](articles/02-streaming-gateway.md) | [Cover](assets/02-streaming-gateway/02-streaming-gateway-cover.png) · [Stream diagram](assets/02-streaming-gateway/02-streaming-flow.png) |
 | Short post | [Why round-robin isn't always enough for inference](posts/01-prefill-decode-field-note.md) | — |
 
-## Run lab 01: streaming gateway
+## Run lab 02: streaming gateway
 
-Requires Go 1.22+ and no external dependencies.
+The Go module lives in [`02-streaming-gateway/`](02-streaming-gateway/). Requires Go 1.22+ and no external dependencies.
+
+From the repository root:
 
 ```bash
+cd 02-streaming-gateway
 go test ./...
 go run ./cmd/mock-backend
 ```
 
-In another terminal:
+In another terminal, enter the same lab directory:
 
 ```bash
+cd 02-streaming-gateway
 BACKEND_URL=http://localhost:8081 go run ./cmd/gateway
 ```
 
@@ -51,7 +55,7 @@ The backend sends **synthetic** SSE events. It does not host a language model, a
 - Short, useful explanations grounded in real engineering constraints.
 - Primary citations for research claims.
 - Code and validation instructions alongside every tutorial.
-- SVG diagrams and thumbnail per long-form article.
+- PNG diagrams and thumbnail per long-form article, grouped by article under `assets/`.
 - Simulated examples clearly separated from real measurements.
 - No invented incidents, experiments or performance results.
 
